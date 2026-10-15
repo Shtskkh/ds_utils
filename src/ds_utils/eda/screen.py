@@ -184,3 +184,82 @@ def screen(df: pl.DataFrame, target_col: str) -> pl.DataFrame:
 
     out = pl.DataFrame(rows, schema=SCHEMA, strict=False)
     return out.sort("separation_score", descending=True, nulls_last=True)
+
+
+def describe_by_class(df: pl.DataFrame, col: str, target_col: str) -> pl.DataFrame:
+    """Describe one numeric column separately for each class.
+
+    Intended for follow-up on columns that rank high in :func:`screen`. Uses
+    robust statistics and percentiles so skewed or outlier-heavy columns are
+    summarised correctly.
+
+    Parameters
+    ----------
+    df : polars.DataFrame
+        Dataset containing ``col`` and ``target``.
+    col : str
+        Name of the numeric column to describe.
+    target_col : str
+        Name of the class column. One output row is produced per class value.
+
+    Returns
+    -------
+    polars.DataFrame
+        One row per class with the following columns:
+
+        count : float
+            Number of non-missing values in the class.
+        mean, std : float
+            Mean and standard deviation. Reliable only for roughly symmetric
+            data without heavy outliers.
+        min, max : float
+            Extremes. Driven by single points; use the percentiles for robust
+            range information.
+        5%, 25%, 50%, 75%, 95% : float
+            Percentiles. 50% is the median. Compare 5%/95% to see tail
+            differences that the median misses.
+        iqr : float
+            Interquartile range (P75 - P25). Robust measure of spread.
+        mad : float
+            Median absolute deviation from the median. Robust measure of
+            spread that tolerates outliers; can be 0 for columns with many
+            repeated values.
+        pct_zero : float
+            Share of exact zeros (0-1) within the class.
+
+    Notes
+    -----
+    Percentiles from very small classes are noisy; bootstrap before drawing
+    conclusions. For binary or categorical columns use per-class rates or
+    value counts instead.
+
+    Examples
+    --------
+    >>> describe_by_class(df, "response_time", "label")
+    """
+
+    y = df.get_column(target_col)
+
+    if y.null_count() or set(y.unique().to_list()) != {0, 1}:
+        raise ValueError("target must be non-null with exactly the classes 0 and 1")
+
+    if df.get_column(col).dtype.is_nested():
+        raise TypeError("Cannot process column with nested dtype.")
+
+    stats = df.group_by(target_col).agg(
+        pl.col(col).count().alias("count"),
+        pl.col(col).mean().alias("mean"),
+        pl.col(col).std().alias("std"),
+        pl.col(col).min().alias("min"),
+        pl.col(col).quantile(0.05).alias("5%"),
+        pl.col(col).quantile(0.25).alias("25%"),
+        pl.col(col).median().alias("50%"),
+        pl.col(col).quantile(0.75).alias("75%"),
+        pl.col(col).quantile(0.95).alias("95%"),
+        pl.col(col).max().alias("max"),
+        (pl.col(col).quantile(0.75) - pl.col(col).quantile(0.25)).alias("iqr"),
+        (pl.col(col) - pl.col(col).median()).abs().median().alias("mad"),
+        pl.col(col).eq(0).mean().alias("pct_zero"),
+    )
+
+    return stats
